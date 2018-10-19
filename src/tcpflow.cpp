@@ -137,6 +137,7 @@ static void usage(int level)
     std::cout << "   -p: don't use promiscuous mode\n";
     std::cout << "   -q: quiet mode - do not print warnings\n";
 
+	std::cout << "   -P pipe      : read pcap file from pipe \n";
     std::cout << "   -r file      : read packets from tcpdump pcap file (may be repeated)\n";
     std::cout << "   -R file      : read packets from tcpdump pcap file TO FINISH CONNECTIONS\n";
     std::cout << "   -v           : verbose operation equivalent to -d 10\n";
@@ -239,8 +240,12 @@ void replace(std::string &str,const std::string &from,const std::string &to)
 feature_recorder_set *the_fs = 0;
 dfxml_writer *xreport = 0;
 pcap_t *pd = 0;
+const char* pcap_pipe_str = NULL;
 void terminate(int sig)
 {
+	if (pcap_pipe_str != NULL) {
+		remove( pcap_pipe_str );
+	}
     if (sig == SIGHUP || sig == SIGINT || sig == SIGTERM) {
         DEBUG(1) ("terminating orderly");
         pcap_breakloop(pd);
@@ -557,6 +562,7 @@ int main(int argc, char *argv[])
     std::cerr << "\n";
 #endif
 
+	std::string pcap_pipe;
     bool opt_enable_report = true;
     bool force_binary_output = false;
     const char *device = 0;             // default device
@@ -584,7 +590,7 @@ int main(int argc, char *argv[])
 
     bool trailing_input_list = false;
     int arg;
-    while ((arg = getopt_long(argc, argv, "aA:Bb:cCd:DE:e:E:F:f:gHhIi:lL:m:o:pqR:r:S:sT:U:Vvw:x:X:z:Z0J", longopts, NULL)) != EOF) {
+    while ((arg = getopt_long(argc, argv, "aA:Bb:cCd:DE:e:E:F:f:gHhIi:lL:m:o:pqR:P:r:S:sT:U:Vvw:x:X:z:Z0J", longopts, NULL)) != EOF) {
 	switch (arg) {
 	case 'a':
 	    demux.opt.post_processing = true;
@@ -680,6 +686,7 @@ int main(int argc, char *argv[])
             break;
 	case 'p': opt_no_promisc = true; DEBUG(10) ("NOT turning on promiscuous mode"); break;
         case 'q': opt_quiet = true; break;
+	case 'P': pcap_pipe = optarg;  break;	
 	case 'R': Rfiles.push_back(optarg); break;
 	case 'r': rfiles.push_back(optarg); break;
         case 'S':
@@ -866,32 +873,58 @@ int main(int argc, char *argv[])
     if(xreport){
         xreport->push("configuration");
     }
-    if(rfiles.size()==0 && Rfiles.size()==0){
+	
+    if (pcap_pipe.size() > 0) {
+
+	if (mkfifo(pcap_pipe.c_str(), 0666) != 0 && errno != EEXIST) {
+		std::cerr << "Fail create pipe " << pcap_pipe << "\n";
+		exit(1);						
+	}
+
+	//save pipe name to delete on termination
+	if (errno != EEXIST) {
+		pcap_pipe_str = pcap_pipe.c_str();
+	}
+
+	DEBUG(2)("Wait pcap files from %s",pcap_pipe.c_str());
+	demux.start_new_connections = true;
+	while(1) {
+	    int err = process_infile(demux,expression,device,pcap_pipe);
+	    if (err < 0) {
+		DEBUG(2)("Processing pcap returns error code %d",err);
+		exit_val = 1;
+	    }			
+	    DEBUG(2)("Open FDs at end of processing:      %d",(int)demux.open_flows.size());
+	    DEBUG(2)("demux.max_open_flows:               %d",(int)demux.max_open_flows);
+	    DEBUG(2)("Flow map size at end of processing: %d",(int)demux.flow_map.size());
+	    DEBUG(2)("Flows seen:                         %d",(int)demux.flow_counter);			
+	}
+
+    } else if(rfiles.size()==0 && Rfiles.size()==0){
 	/* live capture */
 	demux.start_new_connections = true;
-        int err = process_infile(demux,expression,device,"");
-        if (err < 0) {
-            exit_val = 1;
-        }
-        input_fname = device;
-    }
-    else {
+	int err = process_infile(demux,expression,device,"");
+	if (err < 0) {
+	    exit_val = 1;
+	}
+	input_fname = device;
+    } else {
 	/* first pick up the new connections with -r */
 	demux.start_new_connections = true;
 	for(std::vector<std::string>::const_iterator it=rfiles.begin();it!=rfiles.end();it++){
-	    int err = process_infile(demux,expression,device,*it);
-	    if (err < 0) {
-	        exit_val = 1;
-	    }
+		int err = process_infile(demux,expression,device,*it);
+		if (err < 0) {
+			exit_val = 1;
+		}
 	}
 	/* now pick up the outstanding connection with -R, but don't start new connections */
 	demux.start_new_connections = false;
 	for(std::vector<std::string>::const_iterator it=Rfiles.begin();it!=Rfiles.end();it++){
-	    int err = process_infile(demux,expression,device,*it);
-	    if (err < 0) {
-	        exit_val = 1;
-	    }
-	}
+		int err = process_infile(demux,expression,device,*it);
+		if (err < 0) {
+			exit_val = 1;
+		}
+	}        
     }
 
     /* -1 causes pcap_loop to loop forever, but it finished when the input file is exhausted. */
